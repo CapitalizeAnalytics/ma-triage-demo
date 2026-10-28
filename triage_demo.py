@@ -1,6 +1,6 @@
-"""AppSec triage agent on Claude Managed Agents (training demo for Checkmarx R&D).
+"""AppSec triage agent on Claude Managed Agents (reference demo).
 
-Steps, in the same order as the deck:
+Steps:
   1. Agent        - model, instructions, tools
   2. Environment  - a cloud sandbox with no network access
   3. Session      - the agent + environment, with the repo and scan mounted read-only
@@ -8,11 +8,13 @@ Steps, in the same order as the deck:
   5. Result       - ticket drafts checked by our code, plus usage and cost
 """
 import json
+import os
 import pathlib
 import sys
 import time
 
 from anthropic import Anthropic
+from dotenv import load_dotenv
 
 HERE = pathlib.Path(__file__).parent
 SAMPLE = HERE / "sample"
@@ -20,6 +22,7 @@ RUN_DIR = HERE / "runs" / time.strftime("run-%Y%m%d-%H%M%S")
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 (RUN_DIR / "tickets").mkdir()
 
+load_dotenv(HERE / ".env")  # ANTHROPIC_API_KEY and any IDs to reuse; real environment variables win
 client = Anthropic()  # reads the API key from the ANTHROPIC_API_KEY environment variable
 
 FINDINGS = json.loads((SAMPLE / "scan" / "findings.json").read_text())
@@ -64,9 +67,34 @@ TICKET_TOOL = {
     },
 }
 
-REUSE = json.loads(pathlib.Path(sys.argv[1]).read_text()) if len(sys.argv) > 1 else None
+REUSE = json.loads(pathlib.Path(sys.argv[1]).read_text()) if len(sys.argv) > 1 else {}
 
-agent = client.beta.agents.retrieve(REUSE["agent_id"]) if REUSE else client.beta.agents.create(
+
+def reuse(key):
+    """An ID to reuse: from the ids.json passed on the command line, else from .env (e.g. AGENT_ID)."""
+    return REUSE.get(key) or os.environ.get(key.upper()) or None
+
+
+AGENT_ID, ENVIRONMENT_ID = reuse("agent_id"), reuse("environment_id")
+
+
+def get_or_create_agent(agent_id, **config):
+    """Creates the agent, or reuses agent_id if it still matches the config in this file.
+
+    Reusing an agent by ID makes it easy to edit the prompt here, rerun, and have the session
+    quietly run the old prompt. So a reused agent that doesn't match stops the run instead.
+    """
+    if not agent_id:
+        return client.beta.agents.create(**config)
+    existing = client.beta.agents.retrieve(agent_id)
+    if existing.system != config["system"] or getattr(existing.model, "id", existing.model) != config["model"]:
+        raise SystemExit(f"{agent_id} doesn't match the agent config in this file: the instructions or "
+                         "model changed. Clear AGENT_ID in .env to create a new agent.")
+    return existing
+
+
+agent = get_or_create_agent(
+    AGENT_ID,
     name="AppSec Triage Agent",
     model="claude-opus-5-5",
     system=SYSTEM,
@@ -85,14 +113,14 @@ agent = client.beta.agents.retrieve(REUSE["agent_id"]) if REUSE else client.beta
 )
 
 # ---------------------------------------------------------- 2. Environment
-environment = client.beta.environments.retrieve(REUSE["environment_id"]) if REUSE else client.beta.environments.create(
+environment = client.beta.environments.retrieve(ENVIRONMENT_ID) if ENVIRONMENT_ID else client.beta.environments.create(
     name="triage-no-network",
     config={"type": "cloud", "networking": {"type": "limited"}},  # limited + no hosts = no network
 )
 
 # --------------------------------------------------------------- 3. Session
-resources = REUSE["files"] if REUSE else []
-for path in ([] if REUSE else sorted(SAMPLE.rglob("*"))):
+resources = REUSE.get("files", [])                  # file IDs only come from ids.json; .env runs upload fresh
+for path in ([] if resources else sorted(SAMPLE.rglob("*"))):
     if path.is_file() and path.stat().st_size > 0:
         uploaded = client.beta.files.upload(file=path)
         resources.append({
@@ -133,10 +161,10 @@ def create_ticket_draft(ticket: dict) -> str:
     return f"Draft {ticket['finding_id']} saved for human review."
 
 
-log = open(RUN_DIR / "events.jsonl", "w")
 TASK = "Triage the findings in the scanner output for demo-store-api."
 
-with client.beta.sessions.events.stream(session.id) as stream:      # open the stream first...
+with (open(RUN_DIR / "events.jsonl", "w") as log,
+      client.beta.sessions.events.stream(session.id) as stream):     # open the stream first...
     client.beta.sessions.events.send(                                # ...then send the task
         session.id,
         events=[{"type": "user.message", "content": [{"type": "text", "text": TASK}]}],
@@ -152,8 +180,12 @@ with client.beta.sessions.events.stream(session.id) as stream:      # open the s
             case "agent.tool_use":
                 print(f"[{event.name}] {json.dumps(event.input)[:160]}", flush=True)
             case "agent.custom_tool_use":
-                result = create_ticket_draft(event.input)
-                print(f"[create_ticket_draft] {event.input.get('finding_id')} -> {result}", flush=True)
+                try:
+                    result = create_ticket_draft(event.input)
+                except Exception as error:  # always answer: the session waits until it gets a result
+                    result = f"Rejected: ticket check failed ({type(error).__name__}: {error})."
+                finding = event.input.get("finding_id") if isinstance(event.input, dict) else None
+                print(f"[create_ticket_draft] {finding} -> {result}", flush=True)
                 client.beta.sessions.events.send(
                     session.id,
                     events=[{
@@ -163,7 +195,8 @@ with client.beta.sessions.events.stream(session.id) as stream:      # open the s
                     }],
                 )
             case "session.status_idle":
-                if event.stop_reason and event.stop_reason.type == "end_turn":
+                # requires_action means it's waiting on a tool result, which we send above
+                if event.stop_reason and event.stop_reason.type != "requires_action":
                     break
             case "session.error":
                 print(f"[session.error] {event.model_dump(mode='json')}", flush=True)

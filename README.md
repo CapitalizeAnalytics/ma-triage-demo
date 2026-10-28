@@ -1,6 +1,6 @@
-# ma-triage-demo
+# AppSec triage on Claude Managed Agents
 
-A training demo of **Claude Managed Agents** and the agent lifecycle, using a
+A reference demo of **Claude Managed Agents** and the agent lifecycle, using a
 realistic AppSec task: triaging SQL injection findings from a static analysis
 scanner.
 
@@ -19,7 +19,7 @@ The same task is built two ways, so you can compare them side by side:
 
 ## What happens in `triage_demo.py`
 
-The steps follow the order of the deck:
+The steps:
 
 1. **Agent**: model, instructions (system prompt) and tools. All built-in
    tools are switched off except `read`, `glob` and `grep`, plus one custom
@@ -32,6 +32,10 @@ The steps follow the order of the deck:
    finding ID, an invalid verdict or severity, or no `file:line` evidence.
 5. **Result**: accepted ticket drafts, plus the session's token usage.
 
+If our tool code throws, the error goes back to the agent as a rejection
+instead of leaving the session waiting forever, and the script stops when the
+session goes idle for any reason other than waiting on our tool.
+
 ## Setup
 
 You need Python 3.10 or newer and an Anthropic API key with access to Managed
@@ -41,10 +45,13 @@ Agents.
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...  # Windows: set ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env                # Windows: copy .env.example .env
 ```
 
-Never commit your API key. `.env` is already in `.gitignore`.
+Then open `.env` and set `ANTHROPIC_API_KEY`. The scripts load `.env` on
+start; a variable already set in your shell takes precedence. Never commit
+your API key: `.env` is in `.gitignore`, and only `.env.example` (with blank
+values) is committed.
 
 ## Running it
 
@@ -62,19 +69,20 @@ Each run creates a new timestamped folder under `runs/`:
   tokens, estimated cost, per-turn breakdown), `messages.json` (full
   conversation history) and `tickets/`.
 
-The `runs/` folder already has a few example runs, so you can see the output
-without running anything.
+`runs/` is in `.gitignore`, so your runs and their IDs stay on your machine.
 
 **Reusing an agent:** `triage_demo.py` creates a new agent, environment and
-uploaded files every time. To reuse them from an earlier run *in your own
-account*, pass that run's `ids.json`:
+uploaded files every time. To reuse the agent and environment from an earlier
+run *in your own account*, copy `agent_id` and `environment_id` from that run's
+`ids.json` into `AGENT_ID` and `ENVIRONMENT_ID` in `.env`. If you edit the
+agent's instructions or model in the script, the run stops instead of quietly
+using the old agent: clear `AGENT_ID` and a new agent is created. The sample
+files are still uploaded fresh each run. To reuse the uploaded files too, pass the whole
+`ids.json` instead, which takes precedence over `.env`:
 
 ```bash
 python triage_demo.py runs/run-YYYYMMDD-HHMMSS/ids.json
 ```
-
-The IDs in the committed example runs belong to the original author's
-account, so they won't work with a different API key.
 
 ## The sample
 
@@ -107,6 +115,7 @@ python -m pytest
 triage_demo.py        Managed Agents version
 triage_loop.py        hand-written agent loop version
 requirements.txt      Python packages
+.env.example          template for your .env (API key, IDs to reuse)
 sample/               the fictional repo and scan report the agent triages
-runs/                 output of each run (example runs included)
+runs/                 output of each run (created when you run a script, not committed)
 ```
